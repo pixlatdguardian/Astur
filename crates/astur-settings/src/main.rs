@@ -5285,6 +5285,11 @@ const ACTIONS: &[(&str, &str, Arg)] = &[
     ("launch", "Run a command", Arg::Command),
     ("switch_workspace", "Switch to workspace", Arg::Workspace),
     (
+        "switch_workspace_all",
+        "Switch workspace on all monitors",
+        Arg::Workspace,
+    ),
+    (
         "move_to_workspace",
         "Move the window to workspace",
         Arg::Workspace,
@@ -7590,7 +7595,7 @@ fn click_ui(
                 for &(a, _) in BAR_ACTIONS {
                     if ui.selectable_label(a == action, label(a)).clicked() && a != action {
                         out = Some(match a {
-                            "switch_workspace" => "switch_workspace 1".to_string(),
+                            "switch_workspace" | "switch_workspace_all" => format!("{a} 1"),
                             _ => a.to_string(),
                         });
                     }
@@ -7600,10 +7605,10 @@ fn click_ui(
             .on_hover_text(label(action));
     });
     match action {
-        "switch_workspace" => {
+        "switch_workspace" | "switch_workspace_all" => {
             let mut n = arg.parse::<usize>().unwrap_or(1);
             if workspace_drag(ui, &mut n, ws) {
-                out = Some(format!("switch_workspace {n}"));
+                out = Some(format!("{action} {n}"));
             }
             if let Some(why) = missing_workspace(n, ws) {
                 warn_note(ui, &why);

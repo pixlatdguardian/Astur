@@ -237,6 +237,24 @@ in `%USERPROFILE%\.astur\astur.conf`, along with workspace keys, gaps, layout,
 borders, rules, launcher, menus, and desktop tools. Status bar uses `navbar.conf`
 in same folder. Both files **hot-reload** on save.
 
+### Switch all monitors to a workspace
+
+With `workspace_mode = per_monitor`, choose **Switch workspace on all monitors**
+in Settings → Shortcuts → Extra hotkeys, or add the following binding to your
+existing `extra_hotkeys` list with `;;` as the separator:
+
+```text
+MOD+CTRL+2|switch_workspace_all|2
+```
+
+Each monitor shows its own workspace 2, and keyboard focus stays on the
+previously focused monitor. This grouped switch skips the workspace slide.
+The usual workspace shortcuts still use the configured transition.
+
+For scripting, send `switch_all 2` to Astur's local named pipe when
+`ipc_enabled = true`. The number starts at 1. A switch requires the requested
+workspace on every monitor. Monitors already showing it are left alone.
+
 ## Scrolling layout
 
 `layout = scrolling` (or a monitor's entry in `monitor_layouts`) lays windows out

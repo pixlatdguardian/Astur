@@ -295,8 +295,8 @@ pub const BAR_CLICK_WIDGETS: &[&str] = &[
 ];
 
 /// Every bar click action: (value, plain-English label for Settings). The
-/// last two take an argument after a space: `switch_workspace 3`,
-/// `launch wt -p Ubuntu`. Hotkeys and bar clicks share the WM's action
+/// workspace and launch actions take an argument after a space. Hotkeys
+/// and bar clicks share the WM's action
 /// runner, so a name means the same in both.
 pub const BAR_ACTIONS: &[(&str, &str)] = &[
     ("none", "Do nothing"),
@@ -330,6 +330,10 @@ pub const BAR_ACTIONS: &[(&str, &str)] = &[
     ("next_layout", "Next layout"),
     ("switch_workspace", "Go to workspace\u{2026}"),
     ("launch", "Open an app or command\u{2026}"),
+    (
+        "switch_workspace_all",
+        "Go to workspace on all monitors\u{2026}",
+    ),
 ];
 
 /// What a click does with no `<widget>_click` line: [left, right, middle].
@@ -1810,6 +1814,8 @@ async_window_pos = true
 # SHIFT, ALT, WIN and one key name. It needs MOD, ALT or WIN. With
 # main_key = lalt, ALT is Left Alt, the same as MOD.
 # Escape literal field separators with a leading backslash.
+# In per_monitor mode, MOD+CTRL+2|switch_workspace_all|2 switches every
+# monitor to workspace 2 together, without a slide.
 extra_hotkeys = ALT+GRAVE|scratchpad|
 
 # ============================================================================
@@ -2064,6 +2070,7 @@ workspace_apps = false
 #   media_play_pause media_next media_prev launcher system_menu
 #   workspace_next workspace_prev next_layout
 #   switch_workspace N        (go to workspace N)
+#   switch_workspace_all N    (go to workspace N on every monitor in per_monitor mode)
 #   launch COMMAND            (as extra_hotkeys' launch)
 # Without a line, a click does this (left / right; middle does nothing):
 #   clock, date   calendar / datetime_settings
