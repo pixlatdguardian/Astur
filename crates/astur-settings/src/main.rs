@@ -5284,6 +5284,12 @@ enum Arg {
 const ACTIONS: &[(&str, &str, Arg)] = &[
     ("launch", "Run a command", Arg::Command),
     ("switch_workspace", "Switch to workspace", Arg::Workspace),
+    ("switch_previous", "Return to previous workspace", Arg::None),
+    (
+        "switch_previous_all",
+        "Return all monitors to previous workspaces",
+        Arg::None,
+    ),
     (
         "switch_workspace_all",
         "Switch workspace on all monitors",

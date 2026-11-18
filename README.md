@@ -258,6 +258,21 @@ shared mode or when the number exceeds the configured workspace count.
 has the requested workspace before changing any display. Monitors already
 showing it are left alone.
 
+### Return to previous workspaces
+
+Add these actions under Settings → Shortcuts → Extra hotkeys, or add them to
+`extra_hotkeys`:
+
+```text
+MOD+BACKSPACE|switch_previous| ;; MOD+CTRL+BACKSPACE|switch_previous_all|
+```
+
+`switch_previous` toggles the focused display between its current and last
+workspace. `switch_previous_all` swaps the current display arrangement with
+the one saved by the last grouped switch, including mixed workspace numbers.
+Grouped history requires per-monitor mode and the saved displays and slots.
+Both actions are also available over local IPC. History is per session.
+
 ## Scrolling layout
 
 `layout = scrolling` (or a monitor's entry in `monitor_layouts`) lays windows out
