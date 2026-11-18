@@ -176,6 +176,7 @@ struct Rows {
     /// sets for workspaces not shown, for when the count goes back up.
     ws: Vec<WsRow>,
     rules: Vec<RuleRow>,
+    opacity_exempt: Vec<String>,
     entries: Vec<EntryRow>,
     actions: Vec<ActionRow>,
     /// Power-menu built-ins as (name, shown), in menu order.
@@ -278,6 +279,7 @@ impl Rows {
                 .chain(c.ignore_classes.iter().map(|k| class("ignore", k)))
                 .chain(c.float_classes.iter().map(|k| class("float", k)))
                 .collect(),
+            opacity_exempt: c.opacity_exempt.clone(),
             entries: c
                 .launcher_entries
                 .iter()
@@ -320,6 +322,11 @@ impl Rows {
                 .filter(|&col| ws_column(&self.ws, col, workspaces).is_err())
                 .count()
             + self.rules.iter().filter(|r| rule_check(r).is_err()).count()
+            + self
+                .opacity_exempt
+                .iter()
+                .filter(|app| opacity_app_check(app).is_err())
+                .count()
             + self
                 .entries
                 .iter()
@@ -1747,7 +1754,13 @@ impl App {
     }
 
     fn appearance(&mut self, ui: &mut Ui) {
-        let (c, d, f) = (&mut self.cfg, &self.def, &mut self.find);
+        let (c, d, f, rows, defaults) = (
+            &mut self.cfg,
+            &self.def,
+            &mut self.find,
+            &mut self.mir.rows,
+            &self.def_mir.rows,
+        );
         section(ui, f, "Theme");
         theme_row(ui, f, &mut c.theme, &d.theme);
         section(ui, f, "Windows");
@@ -1764,6 +1777,25 @@ impl App {
         );
         if dim != cur {
             c.unfocused_opacity = opacity_for_dim(dim);
+        }
+        if table(
+            ui,
+            f,
+            ("Dimming exceptions", "These apps keep their own opacity while inactive. Type an executable name or pick an open window.", "opacity_exempt"),
+            &mut rows.opacity_exempt,
+            &defaults.opacity_exempt,
+            ("+ Add app", String::new()),
+            |ui, _, app| {
+                cell(ui, app, "App, e.g. brave.exe", 170.0);
+                if let Some(w) = window_picker(ui).filter(|w| !w.exe.is_empty()) {
+                    *app = file_name(&w.exe).to_string();
+                }
+                opacity_app_check(app).err()
+            },
+        ) {
+            if let Ok(apps) = all(&rows.opacity_exempt, |app| opacity_app_check(app)) {
+                c.opacity_exempt = apps;
+            }
         }
         toggle(
             ui,
@@ -5845,6 +5877,19 @@ fn fold_rules(rows: &[RuleRow], c: &mut Config) {
         .collect();
 }
 
+fn opacity_app_check(app: &str) -> Result<String, String> {
+    let name = app.trim();
+    if name.len() > 4
+        && !name.contains(['\\', '/', ',', ':', '*', '?', '"', '<', '>', '|'])
+        && !name.chars().any(char::is_control)
+        && name.to_ascii_lowercase().ends_with(".exe")
+    {
+        Ok(name.to_string())
+    } else {
+        Err("Enter an executable file name, such as brave.exe.".into())
+    }
+}
+
 fn fold_entries(rows: &[EntryRow], c: &mut Config) {
     if let Ok(v) = all(rows, entry_check) {
         c.launcher_entries = v;
@@ -6111,6 +6156,7 @@ fn conf_pairs(c: &Config) -> (Pairs, Pairs) {
         ("popup_accent_fg", opt_hex(c.popup_accent_fg)),
         ("popup_border", opt_hex(c.popup_border)),
         ("unfocused_opacity", format!("{:.2}", c.unfocused_opacity)),
+        ("opacity_exempt", c.opacity_exempt.join(", ")),
         ("border_enabled", b(c.border_enabled)),
         ("focused_border", color_to_hex(c.focused_border)),
         ("unfocused_border", color_to_hex(c.unfocused_border)),
@@ -9894,6 +9940,20 @@ mod tests {
     }
 
     #[test]
+    fn opacity_exemption_editor_validates_and_round_trips_app_names() {
+        assert_eq!(opacity_app_check(" Brave.EXE ").unwrap(), "Brave.EXE");
+        assert!(opacity_app_check("").is_err());
+        assert!(opacity_app_check("brave.exe,vlc.exe").is_err());
+        assert!(opacity_app_check(r"C:\Program Files\Brave\brave.exe").is_err());
+        let cfg = parse_text("opacity_exempt = brave.exe, vlc.exe");
+        let read_back = parse_text(&wm_text(&cfg));
+        assert_eq!(
+            Rows::from(&read_back).opacity_exempt,
+            ["brave.exe", "vlc.exe"]
+        );
+    }
+
+    #[test]
     fn tables_round_trip_through_conf_text() {
         // Escaped separators, prefixes, defaults the parser fills in (no
         // group = Custom), old spellings and positional workspace slots.
@@ -10465,6 +10525,7 @@ key_close_window = F4
         APPS.get_or_init(detect_apps);
         DRIVES.get_or_init(ready_drives);
         let wm = "outer_gap = 120\nbar_heigth = 3\nworkspace_slide = false\n\
+            opacity_exempt = brave.exe, vlc.exe\n\
             window_rules = float|Teams.exe|||| ;; tile||Chrome_WidgetWin_1|* - YouTube|3|2\nignore_classes = TaskManagerWindow\n\
             extra_hotkeys = ALT+GRAVE|scratchpad| ;; ALT+SHIFT+J|launch|wt ;; CTRL+Q|launch|notepad ;; ALT+F2|layout|grid\n\
             launcher_entries = Notes|C:\\notes.txt|file ;; Docs|url:https://docs.rs|web\n\
@@ -10492,6 +10553,7 @@ key_close_window = F4
         for key in [
             "extra_hotkeys",
             "window_rules",
+            "opacity_exempt",
             "launcher_entries",
             "system_actions",
         ] {

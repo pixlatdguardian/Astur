@@ -237,6 +237,20 @@ in `%USERPROFILE%\.astur\astur.conf`, along with workspace keys, gaps, layout,
 borders, rules, launcher, menus, and desktop tools. Status bar uses `navbar.conf`
 in same folder. Both files **hot-reload** on save.
 
+### Dimming exceptions
+
+In Settings → Appearance → Windows → **Dimming exceptions**, add an app by
+executable name or pick one of its open windows. The app keeps its own opacity
+when inactive and during window glide. The same windows still tile, float, and
+switch workspaces normally.
+
+The setting is a comma-separated list of file names in `astur.conf`. Names
+are matched without regard to case.
+
+```ini
+opacity_exempt = brave.exe, vlc.exe
+```
+
 ## Scrolling layout
 
 `layout = scrolling` (or a monitor's entry in `monitor_layouts`) lays windows out
