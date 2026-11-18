@@ -5327,6 +5327,12 @@ enum Arg {
 const ACTIONS: &[(&str, &str, Arg)] = &[
     ("launch", "Run a command", Arg::Command),
     ("switch_workspace", "Switch to workspace", Arg::Workspace),
+    ("switch_previous", "Return to previous workspace", Arg::None),
+    (
+        "switch_previous_all",
+        "Return all monitors to previous workspaces",
+        Arg::None,
+    ),
     (
         "switch_workspace_all",
         "Switch workspace on all monitors",
@@ -5347,6 +5353,11 @@ const ACTIONS: &[(&str, &str, Arg)] = &[
     ("grow_master", "Make the main window bigger", Arg::None),
     ("toggle_tiling", "Turn tiling on or off", Arg::None),
     ("toggle_float", "Float or tile the window", Arg::None),
+    (
+        "toggle_pin",
+        "Pin or unpin the window across workspaces",
+        Arg::None,
+    ),
     ("close", "Close the window", Arg::None),
     ("terminal", "Open the terminal", Arg::None),
     ("browser", "Open the browser", Arg::None),

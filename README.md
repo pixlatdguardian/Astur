@@ -258,6 +258,34 @@ shared mode or when the number exceeds the configured workspace count.
 has the requested workspace before changing any display. Monitors already
 showing it are left alone.
 
+### Return to previous workspaces
+
+Add these actions under Settings → Shortcuts → Extra hotkeys, or add them to
+`extra_hotkeys`:
+
+```text
+MOD+BACKSPACE|switch_previous| ;; MOD+CTRL+BACKSPACE|switch_previous_all|
+```
+
+`switch_previous` toggles the focused display between its current and last
+workspace. `switch_previous_all` swaps the current display arrangement with
+the one saved by the last grouped switch, including mixed workspace numbers.
+Grouped history requires per-monitor mode and the saved displays and slots.
+Both actions are also available over local IPC. History is per session.
+
+### Pin a window across workspaces
+
+Add **Pin or unpin the window across workspaces** under Extra hotkeys, or
+add `MOD+O|toggle_pin|` to `extra_hotkeys`. You can also send `toggle_pin`
+to the local IPC pipe.
+
+Pinning a managed window floats it above the other windows on its display.
+It stays visible as you change Astur workspaces. Unpinning leaves it on the
+current workspace and restores whether it was tiled, floating, or already
+always on top. Unpin it before sending it directly to a numbered workspace.
+Workspace slides are skipped on a display with a pinned window so that the
+video or controls stay in place during the switch.
+
 ### Dimming exceptions
 
 In Settings → Appearance → Windows → **Dimming exceptions**, add an app by

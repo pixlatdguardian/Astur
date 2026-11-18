@@ -570,6 +570,7 @@ mod tests {
             focused_mon: 1,
             tiling: true,
             cfg: super::super::Config::defaults(),
+            previous_group: Vec::new(),
             pending_launch_mon: 0,
         };
         mgr.cfg.per_monitor = per_monitor;

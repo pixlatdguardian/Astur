@@ -2525,10 +2525,13 @@ enum Cmd {
     ResizeMaster(f32),
     Switch(usize),
     SwitchAll(usize),
+    SwitchPrevious,
+    SwitchPreviousAll,
     YasbFocus(yasb::Focus),
     MoveToWs(usize),
     ToggleTiling,
     ToggleFloat,
+    TogglePin,
     CloseFocused,
     /// This window was minimized or restored: re-tile its own monitor, if it
     /// is tiled there (`retile_for_target`, resolved when processed).
@@ -2623,10 +2626,13 @@ impl Cmd {
             Cmd::ResizeMaster(_) => "ResizeMaster",
             Cmd::Switch(_) => "Switch",
             Cmd::SwitchAll(_) => "SwitchAll",
+            Cmd::SwitchPrevious => "SwitchPrevious",
+            Cmd::SwitchPreviousAll => "SwitchPreviousAll",
             Cmd::YasbFocus(_) => "YasbFocus",
             Cmd::MoveToWs(_) => "MoveToWs",
             Cmd::ToggleTiling => "ToggleTiling",
             Cmd::ToggleFloat => "ToggleFloat",
+            Cmd::TogglePin => "TogglePin",
             Cmd::CloseFocused => "CloseFocused",
             Cmd::RetileFor(_) => "RetileFor",
             Cmd::RefreshMonitors => "RefreshMonitors",
@@ -4571,6 +4577,7 @@ struct Monitor {
     work_area: RECT, // tiling area (base_work minus the status bar)
     workspaces: Vec<Workspace>,
     active: usize, // index of the currently-shown workspace
+    previous: Option<usize>,
     // This monitor's layout (one of config::LAYOUTS), set by resolve_layouts
     // and changed at runtime by Cmd::SetLayout.
     layout: String,
@@ -4589,6 +4596,7 @@ impl Monitor {
             work_area,
             workspaces,
             active: 0,
+            previous: None,
             layout: String::new(),
         }
     }
@@ -4630,6 +4638,7 @@ struct Manager {
     primary: usize, // index of the main monitor; workspace 1 starts here
     tiling: bool,
     cfg: Config,
+    previous_group: Vec<(isize, usize)>, // (monitor handle, local workspace)
     // HMONITOR a launched terminal/browser should land on (the cursor's monitor at
     // launch time); consumed by the next Add. 0 = none.
     pending_launch_mon: isize,
@@ -5474,6 +5483,7 @@ fn distribute_workspaces(
         if m.active >= m.workspaces.len() {
             m.active = 0;
         }
+        m.previous = m.previous.filter(|&n| n < count && n != m.active);
     }
 }
 
@@ -6077,8 +6087,11 @@ unsafe fn ipc_dispatch(line: &str) -> String {
         },
         "focus_next" => push_cmd(Cmd::FocusDir(1)),
         "focus_prev" => push_cmd(Cmd::FocusDir(-1)),
+        "switch_previous" if argument.is_empty() => push_cmd(Cmd::SwitchPrevious),
+        "switch_previous_all" if argument.is_empty() => push_cmd(Cmd::SwitchPreviousAll),
         "toggle_tiling" => push_cmd(Cmd::ToggleTiling),
         "toggle_float" => push_cmd(Cmd::ToggleFloat),
+        "toggle_pin" if argument.is_empty() => push_cmd(Cmd::TogglePin),
         "close" => push_cmd(Cmd::CloseFocused),
         "layout" if config::LAYOUTS.contains(&argument.as_str()) => {
             push_cmd(Cmd::SetLayout(argument));
@@ -6117,7 +6130,7 @@ unsafe fn ipc_dispatch(line: &str) -> String {
             );
         }
         "help" => {
-            return "ok switch switch_all move focus_next focus_prev toggle_tiling toggle_float close layout scratchpad terminal browser launcher system_menu reload launch status focus_column_left focus_column_right move_column_left move_column_right cycle_width cycle_height center_column consume_left consume_right toggle_tabbed maximize_column first_column last_column\n".to_string();
+            return "ok switch switch_all switch_previous switch_previous_all move focus_next focus_prev toggle_tiling toggle_float toggle_pin close layout scratchpad terminal browser launcher system_menu reload launch status focus_column_left focus_column_right move_column_left move_column_right cycle_width cycle_height center_column consume_left consume_right toggle_tabbed maximize_column first_column last_column\n".to_string();
         }
         // The scrolling actions, the same list as extra_hotkeys.
         other => match scroll_action(other) {
@@ -6369,6 +6382,7 @@ unsafe fn restore_windows(list: &[isize]) {
         .partition(|&&h| IsHungAppWindow(hwnd_from(h)).as_bool());
     for &h in ok.iter().chain(&hung) {
         unstyle_visible(hwnd_from(h));
+        release_pin(hwnd_from(h));
     }
     // A reveal that could not be posted waits for its app, after everything
     // else visible: a watchdog cut here keeps rescue.lst for the next start.
@@ -7495,12 +7509,96 @@ unsafe fn recover_window_opacity(hwnd: HWND) {
     }
 }
 
-unsafe fn rescue_opacity() {
+unsafe fn rescue_window_styles() {
     unsafe extern "system" fn restore(hwnd: HWND, _: LPARAM) -> BOOL {
         recover_window_opacity(hwnd);
+        release_pin(hwnd);
         BOOL(1)
     }
     let _ = EnumWindows(Some(restore), LPARAM(0));
+}
+
+// The record travels with the HWND and survives a manager crash. Save native
+// topmost separately so unpinning and startup only undo what Astur changed.
+const PIN_RECORD: PCWSTR = w!("Astur.WindowPin.v1");
+const PIN_PRESENT: usize = 1;
+const PIN_WAS_FLOATING: usize = 1 << 1;
+const PIN_WAS_TOPMOST: usize = 1 << 2;
+
+unsafe fn pin_record(h: isize) -> usize {
+    GetPropW(hwnd_from(h), PIN_RECORD).0 as usize
+}
+
+unsafe fn set_pin_topmost(hwnd: HWND, topmost: bool) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{HWND_NOTOPMOST, SWP_NOMOVE};
+    SetWindowPos(
+        hwnd,
+        if topmost {
+            HWND_TOPMOST
+        } else {
+            HWND_NOTOPMOST
+        },
+        0,
+        0,
+        0,
+        0,
+        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
+    )
+    .is_ok()
+}
+
+unsafe fn release_pin(hwnd: HWND) -> Option<bool> {
+    let flags = pin_record(hwnd.0 as isize);
+    if flags == 0 || (flags & PIN_WAS_TOPMOST == 0 && !set_pin_topmost(hwnd, false)) {
+        return None;
+    }
+    RemovePropW(hwnd, PIN_RECORD).ok()?;
+    Some(flags & PIN_WAS_FLOATING != 0)
+}
+
+unsafe fn toggle_pinned_window(mgr: &mut Manager, h: isize) {
+    let Some((mi, wi)) = mgr.locate(h) else {
+        return;
+    };
+    if wi != mgr.monitors[mi].active || SCRATCHPAD_HWND.load(Ordering::Relaxed) == h {
+        return;
+    }
+    let hwnd = hwnd_from(h);
+    let ws = &mut mgr.monitors[mi].workspaces[wi];
+    if pin_record(h) != 0 {
+        let Some(was_floating) = release_pin(hwnd) else {
+            return;
+        };
+        if !was_floating {
+            ws.floating.retain(|&window| window != h);
+        }
+    } else {
+        let floating = ws.floating.contains(&h);
+        let topmost = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST.0 != 0;
+        let mut flags = PIN_PRESENT;
+        if floating {
+            flags |= PIN_WAS_FLOATING;
+        }
+        if topmost {
+            flags |= PIN_WAS_TOPMOST;
+        }
+        if SetPropW(hwnd, PIN_RECORD, HANDLE(flags as *mut c_void)).is_err() {
+            return;
+        }
+        if !topmost && !set_pin_topmost(hwnd, true) {
+            let _ = RemovePropW(hwnd, PIN_RECORD);
+            return;
+        }
+        if !floating {
+            ws.floating.push(h);
+            unpark_tracked(h);
+            slot_forget(h);
+        }
+    }
+    cancel_workspace_slides();
+    snap_clear();
+    ensure_visible(mgr, mi, wi);
+    retile_monitor_opts(mgr, mi, true);
 }
 
 unsafe fn window_opacity(hwnd: HWND) -> WindowOpacity {
@@ -9173,6 +9271,12 @@ fn slide_cancel_pending() -> bool {
         }
         None => false,
     }
+}
+
+fn cancel_workspace_slides() {
+    let cancelled = SLIDE_GEN.fetch_add(1, Ordering::SeqCst);
+    SLIDE_CANCEL_THROUGH.store(cancelled, Ordering::SeqCst);
+    slide_cancel_pending();
 }
 
 // =========================================================================
@@ -11371,6 +11475,7 @@ unsafe fn switch_plain(mgr: &mut Manager, mi: usize, old: usize, n: usize) {
 /// Change one monitor's visible set. The caller suppresses WinEvents and
 /// places the newly shown windows after the visibility changes.
 unsafe fn switch_workspace_visibility(mgr: &mut Manager, mi: usize, old: usize, n: usize) {
+    let pinned = carry_pinned_windows(&mut mgr.monitors[mi], old, n);
     // Iterate by index (no Vec clone per switch): the manager owns `mgr` on this
     // thread and ShowWindow touches no Astur state, so the borrow is safe to hold.
     // Every hide is marked in HIDDEN_BY_US BEFORE the ShowWindow so the async
@@ -11384,6 +11489,7 @@ unsafe fn switch_workspace_visibility(mgr: &mut Manager, mi: usize, old: usize, 
         }
     }
     mgr.monitors[mi].active = n;
+    mgr.monitors[mi].previous = Some(old);
     {
         let ws = &mgr.monitors[mi].workspaces[n].windows;
         for &h in ws.iter() {
@@ -11392,6 +11498,9 @@ unsafe fn switch_workspace_visibility(mgr: &mut Manager, mi: usize, old: usize, 
                 continue;
             }
             unmark_hidden_by_us(h);
+            if pinned.contains(&h) {
+                continue; // already visible, or minimized by the user
+            }
             // SHOWNA: reveal without activating. SW_SHOW activated every
             // window it showed (one cross-process activate/deactivate chain
             // and FOREGROUND event each), only for focus_window(f) to pick the
@@ -11402,6 +11511,39 @@ unsafe fn switch_workspace_visibility(mgr: &mut Manager, mi: usize, old: usize, 
             let _ = ShowWindow(hwnd_from(h), SW_SHOWNA);
         }
     }
+}
+
+/// Give pinned floats to the incoming workspace without hiding or showing them.
+/// The destination's existing focus wins over windows carried into it.
+unsafe fn carry_pinned_windows(mon: &mut Monitor, old: usize, next: usize) -> Vec<isize> {
+    let [outgoing, incoming] = mon
+        .workspaces
+        .get_disjoint_mut([old, next])
+        .expect("distinct workspaces");
+    let pinned: Vec<_> = outgoing
+        .floating
+        .iter()
+        .copied()
+        .filter(|&h| pin_record(h) != 0)
+        .collect();
+    if pinned.is_empty() {
+        return pinned;
+    }
+    outgoing.windows.retain(|h| !pinned.contains(h));
+    outgoing.floating.retain(|h| !pinned.contains(h));
+    for &h in &pinned {
+        outgoing.strip.forget(h);
+    }
+    if pinned.contains(&outgoing.focused) {
+        outgoing.focused = 0;
+        outgoing.focused = focus_target(outgoing);
+    }
+    incoming.windows.extend(&pinned);
+    incoming.floating.extend(&pinned);
+    if incoming.focused == 0 {
+        incoming.focused = focus_target(incoming);
+    }
+    pinned
 }
 
 /// Capture a monitor's current pixels into a GPU-backed off-screen bitmap (DDB,
@@ -11497,7 +11639,12 @@ unsafe fn switch_monitor_workspace(mgr: &mut Manager, mi: usize, n: usize) {
     bump_follow_settle();
     // Not gated on tiling: the transition is cosmetic and works in float mode too.
     let mode = WsAnim::from_cfg(&mgr.cfg);
-    let mut want_slide = mgr.cfg.animations && mgr.cfg.animation_ms > 0 && mode != WsAnim::Off;
+    let has_pins = mgr.monitors[mi].workspaces[old]
+        .floating
+        .iter()
+        .any(|&h| pin_record(h) != 0);
+    let mut want_slide =
+        mgr.cfg.animations && mgr.cfg.animation_ms > 0 && mode != WsAnim::Off && !has_pins;
     let dir = if n > old { 1 } else { -1 };
     let hmon = mgr.monitors[mi].hmon;
     // Slide region = the tiling work area, NOT the full monitor. This excludes the
@@ -11721,12 +11868,20 @@ fn validate_switch_all(cfg: &Config, n: usize) -> Result<(), &'static str> {
 
 /// Resolve every target before changing any display. The focused monitor goes
 /// last so hiding its foreground window doesn't shift focus early in the pass.
-fn all_workspace_switches(mgr: &Manager, n: usize) -> Result<Vec<(usize, usize)>, &'static str> {
-    validate_switch_all(&mgr.cfg, n)?;
+fn group_workspace_switches(
+    mgr: &Manager,
+    slots: &[usize],
+) -> Result<Vec<(usize, usize, usize)>, &'static str> {
     if mgr.monitors.is_empty() {
         return Err("no monitors are available");
     }
-    if mgr.monitors.iter().any(|m| n >= m.workspaces.len()) {
+    if slots.len() != mgr.monitors.len()
+        || mgr
+            .monitors
+            .iter()
+            .zip(slots)
+            .any(|(m, &n)| n >= m.workspaces.len())
+    {
         return Err("requested workspace is missing on at least one monitor");
     }
     let focused = mgr.focused().0;
@@ -11735,35 +11890,60 @@ fn all_workspace_switches(mgr: &Manager, n: usize) -> Result<Vec<(usize, usize)>
         .chain(std::iter::once(focused))
         .filter_map(|mi| {
             let old = mgr.monitors[mi].active;
-            (old != n).then_some((mi, old))
+            let n = slots[mi];
+            (old != n).then_some((mi, old, n))
         })
         .collect())
 }
 
+unsafe fn switch_all_workspaces(mgr: &mut Manager, n: usize) {
+    match all_workspace_switches(mgr, n) {
+        Ok(changes) => switch_workspace_group(mgr, &changes),
+        Err(reason) => log_debug!("switch_all {} ignored: {reason}", n + 1),
+    }
+}
+
+fn all_workspace_switches(
+    mgr: &Manager,
+    n: usize,
+) -> Result<Vec<(usize, usize, usize)>, &'static str> {
+    validate_switch_all(&mgr.cfg, n)?;
+    group_workspace_switches(mgr, &vec![n; mgr.monitors.len()])
+}
+
+/// Match by display identity. Any missing screen or slot invalidates the whole group.
+fn previous_group_slots(mgr: &Manager) -> Option<Vec<usize>> {
+    if !mgr.cfg.per_monitor || mgr.previous_group.len() != mgr.monitors.len() {
+        return None;
+    }
+    mgr.monitors
+        .iter()
+        .map(|mon| {
+            let &(_, n) = mgr
+                .previous_group
+                .iter()
+                .find(|&&(hmon, _)| hmon == mon.hmon)?;
+            (n < mon.workspaces.len()).then_some(n)
+        })
+        .collect()
+}
+
 /// Switch independent workspace slots in one manager command. Keep showing
 /// and hiding close together, then lay out and style the incoming windows.
-unsafe fn switch_all_workspaces(mgr: &mut Manager, n: usize) {
-    let changes = match all_workspace_switches(mgr, n) {
-        Ok(changes) => changes,
-        Err(reason) => {
-            log_debug!("switch_all {} ignored: {reason}", n + 1);
-            return;
-        }
-    };
+unsafe fn switch_workspace_group(mgr: &mut Manager, changes: &[(usize, usize, usize)]) {
     if changes.is_empty() || EXITING.load(Ordering::Relaxed) {
         return;
     }
 
     let mut probe = Probe::start("switch_all");
     let focused = mgr.focused().0;
-    let refocus = mgr.monitors[focused].active != n;
+    let refocus = changes.iter().any(|&(mi, _, _)| mi == focused);
+    let previous = mgr.monitors.iter().map(|m| (m.hmon, m.active)).collect();
     cancel_glide();
-    let cancelled = SLIDE_GEN.fetch_add(1, Ordering::SeqCst);
-    SLIDE_CANCEL_THROUGH.store(cancelled, Ordering::SeqCst);
-    slide_cancel_pending();
+    cancel_workspace_slides();
     bump_follow_settle();
 
-    for &(mi, old) in &changes {
+    for &(mi, old, n) in changes {
         // There was no capture on this departure. An older capture of the
         // workspace must not reappear during a later single-monitor slide.
         snap_remove(mgr.monitors[mi].hmon, old);
@@ -11773,7 +11953,7 @@ unsafe fn switch_all_workspaces(mgr: &mut Manager, n: usize) {
     }
 
     SUPPRESS.store(true, Ordering::Relaxed);
-    for &(mi, old) in &changes {
+    for &(mi, old, n) in changes {
         if EXITING.load(Ordering::Relaxed) {
             break;
         }
@@ -11783,14 +11963,15 @@ unsafe fn switch_all_workspaces(mgr: &mut Manager, n: usize) {
     if EXITING.load(Ordering::Relaxed) {
         return;
     }
+    mgr.previous_group = previous;
 
     probe.mark("visibility");
     let f = global_focus(mgr);
-    for &(mi, _) in &changes {
+    for &(mi, _, _) in changes {
         place_active_instant(mgr, mi);
         style_active(mgr, mi, f);
     }
-    queue_workspace_wallpaper(mgr, focused, n);
+    queue_workspace_wallpaper(mgr, focused, mgr.monitors[focused].active);
     queue_manager_state(mgr);
     if refocus {
         activate_workspace_focus(mgr, focused, f, &mut probe);
@@ -11825,9 +12006,9 @@ unsafe fn refresh_monitors(mgr: &mut Manager) {
         .unwrap_or(0);
     // (old hmon, old local wi, old global ws, hwnd, floating?)
     let mut tracked: Vec<(isize, usize, usize, isize, bool)> = Vec::new();
-    let mut old_active: Vec<(isize, usize)> = Vec::new();
+    let mut old_active = Vec::new();
     for (mi, mon) in mgr.monitors.iter().enumerate() {
-        old_active.push((mon.hmon, mon.active));
+        old_active.push((mon.hmon, mon.active, mon.previous));
         for (wi, ws) in mon.workspaces.iter().enumerate() {
             let global = if per_monitor {
                 wi
@@ -11856,10 +12037,11 @@ unsafe fn refresh_monitors(mgr: &mut Manager) {
     let primary = primary_index(&fresh);
     distribute_workspaces(&mut fresh, primary, mgr.cfg.workspaces, mgr.cfg.per_monitor);
     for mon in fresh.iter_mut() {
-        if let Some((_, a)) = old_active.iter().find(|(hm, _)| *hm == mon.hmon) {
-            if *a < mon.workspaces.len() {
-                mon.active = *a;
+        if let Some(&(_, a, previous)) = old_active.iter().find(|(hm, _, _)| *hm == mon.hmon) {
+            if a < mon.workspaces.len() {
+                mon.active = a;
             }
+            mon.previous = previous.filter(|&n| n < mon.workspaces.len() && n != mon.active);
         }
     }
     for (hmon, wi, strip) in strips {
@@ -11888,7 +12070,10 @@ unsafe fn refresh_monitors(mgr: &mut Manager) {
         if !tracked_window_alive(hwnd_from(h)) {
             continue;
         }
-        let (mi, target_wi) = if per_monitor {
+        let (mi, target_wi) = if pin_record(h) != 0 {
+            let mi = mgr.mon_by_hmon(old_hmon).unwrap_or(mgr.focused_mon);
+            (mi, mgr.monitors[mi].active)
+        } else if per_monitor {
             // Per-monitor: workspaces are independent per screen. A surviving
             // monitor keeps its exact local workspace; a window from a gone
             // monitor falls to the focused monitor's same-numbered workspace.
@@ -11942,13 +12127,22 @@ unsafe fn refresh_monitors(mgr: &mut Manager) {
 /// lowers the workspace count): one moved from a hidden workspace onto an
 /// active one must be shown, and vice versa. Without this they stay SW_HIDE'd
 /// and appear to vanish, missing from rescue.lst's hidden list too.
-unsafe fn normalize_visibility(mgr: &Manager) {
+unsafe fn normalize_visibility(mgr: &mut Manager) {
     SUPPRESS.store(true, Ordering::Relaxed);
-    for mon in &mgr.monitors {
+    for mon in &mut mgr.monitors {
         let active = mon.active;
+        for wi in 0..mon.workspaces.len() {
+            if wi != active {
+                carry_pinned_windows(mon, wi, active);
+            }
+        }
         for (wi, ws) in mon.workspaces.iter().enumerate() {
             let show = wi == active;
             for &h in &ws.windows {
+                if ws.floating.contains(&h) && pin_record(h) != 0 {
+                    unmark_hidden_by_us(h);
+                    continue;
+                }
                 // A scratchpad toggled away stays away, as on a switch: shown
                 // here it popped back while SCRATCHPAD_HIDDEN stayed true, so
                 // the next toggle press only re-hid it.
@@ -12170,6 +12364,8 @@ unsafe fn run_action(mgr: &mut Manager, action: &str, argument: &str) {
     let core = match action {
         "focus_next" => Some(Cmd::FocusDir(1)),
         "focus_prev" => Some(Cmd::FocusDir(-1)),
+        "switch_previous" => Some(Cmd::SwitchPrevious),
+        "switch_previous_all" => Some(Cmd::SwitchPreviousAll),
         "swap_next" => Some(Cmd::SwapDir(1)),
         "swap_prev" => Some(Cmd::SwapDir(-1)),
         "promote_master" => Some(Cmd::PromoteMaster),
@@ -12177,6 +12373,7 @@ unsafe fn run_action(mgr: &mut Manager, action: &str, argument: &str) {
         "grow_master" => Some(Cmd::ResizeMaster(0.05)),
         "toggle_tiling" => Some(Cmd::ToggleTiling),
         "toggle_float" => Some(Cmd::ToggleFloat),
+        "toggle_pin" => Some(Cmd::TogglePin),
         "close" | "close_window" => Some(Cmd::CloseFocused),
         "terminal" => Some(Cmd::LaunchTerminal),
         "browser" => Some(Cmd::LaunchBrowser),
@@ -12433,6 +12630,7 @@ unsafe fn untrack_window(mgr: &mut Manager, h: isize) {
         // LAST_SENT still holds it (pruned at the next sync).
         unpark_tracked(h);
         unstyle_window(hwnd_from(h));
+        release_pin(hwnd_from(h));
         // Out of MANAGED now, not at the sync after this command: the retile
         // below raises SUPPRESS, and an app re-showing `h` meanwhile would
         // pass for our own echo (SUPPRESS && is_managed) and be dropped,
@@ -12818,6 +13016,12 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
             } else {
                 config::reload_groups(&mgr.cfg, &cfg)
             };
+            if mgr.cfg.per_monitor != cfg.per_monitor {
+                mgr.previous_group.clear();
+                for mon in &mut mgr.monitors {
+                    mon.previous = None;
+                }
+            }
             mgr.cfg = *cfg;
             // The file wins over runtime layout switches on EVERY reload, as
             // it did while the layout was global (the diff above saw the
@@ -12971,6 +13175,24 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
             show_workspace(mgr, mi, local);
         }
         Cmd::SwitchAll(i) => switch_all_workspaces(mgr, i),
+        Cmd::SwitchPrevious => {
+            let mi = mgr.focused().0;
+            if let Some(mon) = mgr.monitors.get(mi) {
+                if let Some(n) = mon
+                    .previous
+                    .filter(|&n| n < mon.workspaces.len() && n != mon.active)
+                {
+                    show_workspace(mgr, mi, n);
+                }
+            }
+        }
+        Cmd::SwitchPreviousAll => {
+            if let Some(slots) = previous_group_slots(mgr) {
+                if let Ok(changes) = group_workspace_switches(mgr, &slots) {
+                    switch_workspace_group(mgr, &changes);
+                }
+            }
+        }
         Cmd::YasbFocus(focus) => yasb::focus_workspace(mgr, focus),
         Cmd::MoveToWs(i) => {
             if i >= mgr.cfg.workspaces || !mgr.tiling || mgr.monitors.is_empty() {
@@ -12979,7 +13201,7 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
             let from_mi = mgr.focused_mon;
             let from_a = mgr.monitors[from_mi].active;
             let h = mgr.monitors[from_mi].workspaces[from_a].focused;
-            if h == 0 {
+            if h == 0 || pin_record(h) != 0 {
                 return;
             }
             let (to_mi, to_local) = mgr.global_to_ml(i);
@@ -13058,7 +13280,7 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                 return;
             }
             let (mi, a, h) = mgr.focused();
-            if h == 0 {
+            if h == 0 || pin_record(h) != 0 {
                 return;
             }
             let ws = &mut mgr.monitors[mi].workspaces[a];
@@ -13077,6 +13299,10 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
             // lie off the view: scroll to it, or it parks while focused.
             ensure_visible(mgr, mi, a);
             retile_monitor(mgr, mi);
+        }
+        Cmd::TogglePin => {
+            let h = GetAncestor(GetForegroundWindow(), GA_ROOTOWNER).0 as isize;
+            toggle_pinned_window(mgr, h);
         }
         Cmd::CloseFocused => {
             let (_, _, h) = mgr.focused();
@@ -18534,6 +18760,7 @@ fn manager_loop(cfg: Config) {
             primary,
             tiling: cfg.start_tiled,
             cfg,
+            previous_group: Vec::new(),
             pending_launch_mon: 0,
         };
         assign_existing_windows(&mut m);
@@ -24712,8 +24939,8 @@ fn main() {
             log_error!("running on built-in defaults, config file left untouched: {e}");
         }
         log_startup_environment(dpi_aware.is_ok());
-        // Restore opacity before adopting windows or applying this run's rules.
-        rescue_opacity();
+        // Restore opacity and pin state before adopting windows for this run.
+        rescue_window_styles();
         if cfg.persist_state {
             load_launcher_mru();
         }
@@ -26633,6 +26860,7 @@ mod tests {
             primary: 0,
             tiling: true,
             cfg: Config::defaults(),
+            previous_group: Vec::new(),
             pending_launch_mon: 0,
         }
     }
@@ -26649,10 +26877,13 @@ mod tests {
         );
 
         mgr.cfg.per_monitor = true;
-        assert_eq!(all_workspace_switches(&mgr, 1).unwrap(), [(0, 0), (1, 0)]);
+        assert_eq!(
+            all_workspace_switches(&mgr, 1).unwrap(),
+            [(0, 0, 1), (1, 0, 1)]
+        );
         assert_eq!(
             all_workspace_switches(&mgr, 2).unwrap(),
-            [(0, 0), (2, 1), (1, 0)]
+            [(0, 0, 2), (2, 1, 2), (1, 0, 2)]
         );
         assert_eq!(
             all_workspace_switches(&mgr, 4),
@@ -26673,6 +26904,102 @@ mod tests {
             all_workspace_switches(&mgr, 1),
             Err("no monitors are available")
         );
+    }
+
+    #[test]
+    fn previous_workspace_toggles_only_the_focused_monitor() {
+        let mut mgr = test_manager(3, 4);
+        mgr.cfg.per_monitor = true;
+        mgr.cfg.workspaces = 4;
+        mgr.cfg.animations = false;
+        mgr.cfg.cursor_follows_focus = false;
+        mgr.cfg.persist_state = false;
+        mgr.focused_mon = 1;
+        mgr.monitors[2].active = 2;
+        unsafe {
+            process(&mut mgr, Cmd::SwitchPrevious);
+            assert_eq!(mgr.monitors[1].active, 0);
+            process(&mut mgr, Cmd::Switch(3));
+            process(&mut mgr, Cmd::Switch(3)); // selecting it again is not a change
+            process(&mut mgr, Cmd::SwitchPrevious);
+            assert_eq!(mgr.monitors[1].active, 0);
+            process(&mut mgr, Cmd::SwitchPrevious);
+        }
+        assert_eq!(
+            mgr.monitors.iter().map(|m| m.active).collect::<Vec<_>>(),
+            [0, 3, 2]
+        );
+        assert_eq!(mgr.focused_mon, 1);
+    }
+
+    #[test]
+    fn previous_group_restores_mixed_slots_and_validates_the_displays() {
+        let mut mgr = test_manager(3, 4);
+        mgr.cfg.per_monitor = true;
+        mgr.cfg.workspaces = 4;
+        mgr.cfg.cursor_follows_focus = false;
+        mgr.cfg.persist_state = false;
+        mgr.focused_mon = 1;
+        mgr.monitors[1].active = 2;
+        mgr.monitors[2].active = 1;
+        unsafe {
+            process(&mut mgr, Cmd::SwitchAll(3));
+            assert_eq!(previous_group_slots(&mgr), Some(vec![0, 2, 1]));
+            mgr.monitors.swap(0, 2);
+            process(&mut mgr, Cmd::SwitchPreviousAll);
+            assert_eq!(
+                mgr.monitors.iter().map(|m| m.active).collect::<Vec<_>>(),
+                [1, 2, 0]
+            );
+            process(&mut mgr, Cmd::SwitchPreviousAll);
+            assert!(mgr.monitors.iter().all(|m| m.active == 3));
+            mgr.monitors[0].hmon = 0x2000;
+            process(&mut mgr, Cmd::SwitchPreviousAll);
+            assert!(mgr.monitors.iter().all(|m| m.active == 3));
+        }
+        assert_eq!(mgr.focused_mon, 1);
+    }
+
+    #[test]
+    fn pinned_float_follows_single_and_grouped_switches_and_can_be_unpinned() {
+        let window = OpacityTestWindow::new(WINDOW_EX_STYLE(0));
+        let native_topmost = OpacityTestWindow::new(WS_EX_TOPMOST);
+        let h = window.0 .0 as isize;
+        let native = native_topmost.0 .0 as isize;
+        let mut mgr = test_manager(3, 4);
+        mgr.cfg.per_monitor = true;
+        mgr.cfg.workspaces = 4;
+        mgr.cfg.cursor_follows_focus = false;
+        mgr.cfg.persist_state = false;
+        mgr.tiling = false;
+        mgr.insert_window(h, 1, 0, None, false);
+        mgr.insert_window(native, 2, 0, None, true);
+        let topmost =
+            |hwnd| unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST.0 != 0 };
+
+        unsafe {
+            let _ = ShowWindow(window.0, SW_SHOWNA);
+            toggle_pinned_window(&mut mgr, h);
+            toggle_pinned_window(&mut mgr, native);
+            assert!(topmost(window.0) && topmost(native_topmost.0));
+            switch_workspace_visibility(&mut mgr, 1, 0, 2);
+            assert_eq!(mgr.locate(h), Some((1, 2)));
+            assert!(IsWindowVisible(window.0).as_bool());
+            process(&mut mgr, Cmd::SwitchAll(3));
+            assert_eq!(mgr.locate(h), Some((1, 3)));
+            assert_eq!(mgr.locate(native), Some((2, 3)));
+            assert!(IsWindowVisible(window.0).as_bool());
+            assert!(!was_hidden_by_us(h));
+            toggle_pinned_window(&mut mgr, h);
+            toggle_pinned_window(&mut mgr, native);
+            assert_eq!(pin_record(h), 0);
+            assert_eq!(pin_record(native), 0);
+        }
+        assert!(!topmost(window.0));
+        assert!(topmost(native_topmost.0));
+        assert!(!mgr.monitors[1].workspaces[3].floating.contains(&h));
+        assert!(mgr.monitors[2].workspaces[3].floating.contains(&native));
+        assert_model_sound(&mgr, &[h, native]);
     }
 
     #[test]
