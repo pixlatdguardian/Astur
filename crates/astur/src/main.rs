@@ -6055,10 +6055,21 @@ unsafe fn ipc_dispatch(line: &str) -> String {
             Some(index) => push_cmd(Cmd::Switch(index)),
             None => return "error expected: switch <workspace>\n".to_string(),
         },
-        "switch_all" => match one_based().filter(|&index| index < config::MAX_WORKSPACES) {
-            Some(index) => push_cmd(Cmd::SwitchAll(index)),
-            None => return "error expected: switch_all <workspace>\n".to_string(),
-        },
+        "switch_all" => {
+            let Some(index) = one_based() else {
+                return "error expected: switch_all <workspace>\n".to_string();
+            };
+            let validation = UI_CFG
+                .lock()
+                .unwrap()
+                .as_ref()
+                .ok_or("workspace configuration is unavailable")
+                .and_then(|cfg| validate_switch_all(cfg, index));
+            if let Err(reason) = validation {
+                return format!("error {reason}\n");
+            }
+            push_cmd(Cmd::SwitchAll(index));
+        }
         "move" => match one_based() {
             Some(index) => push_cmd(Cmd::MoveToWs(index)),
             None => return "error expected: move <workspace>\n".to_string(),
@@ -8140,9 +8151,9 @@ fn slide_gen_live(k: u64, newest: u64, aborted: u64) -> bool {
 }
 
 /// The GLASS value a manager hold moves `glass` to. None = nothing on the
-/// glass (or the hold counter is full).
-fn glass_hold(glass: u64) -> Option<u64> {
-    (glass != 0 && glass & GLASS_HOLDS != GLASS_HOLDS).then_some(glass + 1)
+/// glass, the overlay is cancelled, or the hold counter is full.
+fn glass_hold(glass: u64, cancelled_through: u64) -> Option<u64> {
+    (glass >> 16 > cancelled_through && glass & GLASS_HOLDS != GLASS_HOLDS).then_some(glass + 1)
 }
 
 /// Has the manager released the hold that `glass` records?
@@ -8171,7 +8182,7 @@ fn slide_hold(hmon: isize) -> Option<u64> {
     if late > HOLD_LATE_MS {
         return None;
     }
-    let v = glass_hold(g)?;
+    let v = glass_hold(g, SLIDE_CANCEL_THROUGH.load(Ordering::SeqCst))?;
     GLASS
         .compare_exchange(g, v, Ordering::SeqCst, Ordering::SeqCst)
         .ok()
@@ -11604,30 +11615,47 @@ unsafe fn activate_workspace_focus(mgr: &Manager, mi: usize, f: isize, probe: &m
     }
 }
 
+fn validate_switch_all(cfg: &Config, n: usize) -> Result<(), &'static str> {
+    if !cfg.per_monitor {
+        return Err("switch_all requires workspace_mode = per_monitor");
+    }
+    if n >= cfg.workspaces {
+        return Err("requested workspace exceeds the configured workspace count");
+    }
+    Ok(())
+}
+
 /// Resolve every target before changing any display. The focused monitor goes
 /// last so hiding its foreground window doesn't shift focus early in the pass.
-fn all_workspace_switches(mgr: &Manager, n: usize) -> Vec<(usize, usize)> {
-    if !mgr.cfg.per_monitor
-        || n >= mgr.cfg.workspaces
-        || mgr.monitors.iter().any(|m| n >= m.workspaces.len())
-    {
-        return Vec::new();
+fn all_workspace_switches(mgr: &Manager, n: usize) -> Result<Vec<(usize, usize)>, &'static str> {
+    validate_switch_all(&mgr.cfg, n)?;
+    if mgr.monitors.is_empty() {
+        return Err("no monitors are available");
+    }
+    if mgr.monitors.iter().any(|m| n >= m.workspaces.len()) {
+        return Err("requested workspace is missing on at least one monitor");
     }
     let focused = mgr.focused().0;
-    (0..mgr.monitors.len())
+    Ok((0..mgr.monitors.len())
         .filter(|&mi| mi != focused)
-        .chain((focused < mgr.monitors.len()).then_some(focused))
+        .chain(std::iter::once(focused))
         .filter_map(|mi| {
             let old = mgr.monitors[mi].active;
             (old != n).then_some((mi, old))
         })
-        .collect()
+        .collect())
 }
 
 /// Switch independent workspace slots in one manager command. Keep showing
 /// and hiding close together, then lay out and style the incoming windows.
 unsafe fn switch_all_workspaces(mgr: &mut Manager, n: usize) {
-    let changes = all_workspace_switches(mgr, n);
+    let changes = match all_workspace_switches(mgr, n) {
+        Ok(changes) => changes,
+        Err(reason) => {
+            log_debug!("switch_all {} ignored: {reason}", n + 1);
+            return;
+        }
+    };
     if changes.is_empty() || EXITING.load(Ordering::Relaxed) {
         return;
     }
@@ -26330,17 +26358,36 @@ mod tests {
         mgr.cfg.workspaces = 4;
         mgr.focused_mon = 1;
         mgr.monitors[2].active = 1;
-        assert!(all_workspace_switches(&mgr, 1).is_empty());
+        assert_eq!(
+            all_workspace_switches(&mgr, 1),
+            Err("switch_all requires workspace_mode = per_monitor")
+        );
 
         mgr.cfg.per_monitor = true;
-        assert_eq!(all_workspace_switches(&mgr, 1), [(0, 0), (1, 0)]);
-        assert_eq!(all_workspace_switches(&mgr, 2), [(0, 0), (2, 1), (1, 0)]);
-        assert!(all_workspace_switches(&mgr, 4).is_empty());
+        assert_eq!(all_workspace_switches(&mgr, 1).unwrap(), [(0, 0), (1, 0)]);
+        assert_eq!(
+            all_workspace_switches(&mgr, 2).unwrap(),
+            [(0, 0), (2, 1), (1, 0)]
+        );
+        assert_eq!(
+            all_workspace_switches(&mgr, 4),
+            Err("requested workspace exceeds the configured workspace count")
+        );
 
         mgr.monitors[2].workspaces.truncate(1);
         mgr.monitors[2].active = 0;
+        assert_eq!(
+            all_workspace_switches(&mgr, 1),
+            Err("requested workspace is missing on at least one monitor")
+        );
         unsafe { process(&mut mgr, Cmd::SwitchAll(1)) };
         assert!(mgr.monitors.iter().all(|m| m.active == 0));
+
+        mgr.monitors.clear();
+        assert_eq!(
+            all_workspace_switches(&mgr, 1),
+            Err("no monitors are available")
+        );
     }
 
     #[test]
@@ -26412,7 +26459,7 @@ mod tests {
 
         assert!(mgr.monitors.iter().all(|m| m.active == 1));
         assert_eq!(mgr.focused(), (1, 1, 0));
-        assert!(all_workspace_switches(&mgr, 1).is_empty());
+        assert!(all_workspace_switches(&mgr, 1).unwrap().is_empty());
     }
 
     /// Every tracked window appears exactly once across every workspace, and
@@ -26747,11 +26794,14 @@ mod tests {
         assert!(!slide_gen_live(5, 5, 5));
         assert!(!slide_gen_live(5, 6, 0));
         // Only an overlay on the glass can be held; every hold is a new value.
-        assert_eq!(glass_hold(0), None);
+        assert_eq!(glass_hold(0, 0), None);
         let on = 5u64 << 16;
-        assert_eq!(glass_hold(on), Some(on + 1));
-        assert_eq!(glass_hold(on + 1), Some(on + 2));
-        assert_eq!(glass_hold(on | GLASS_HOLDS), None);
+        assert_eq!(glass_hold(on, 4), Some(on + 1));
+        assert_eq!(glass_hold(on + 1, 0), Some(on + 2));
+        assert_eq!(glass_hold(on | GLASS_HOLDS, 0), None);
+        // Cancelled overlays cannot be reused by the next workspace command.
+        assert_eq!(glass_hold(on, 5), None);
+        assert_eq!(glass_hold(on + 1, 6), None);
         // A release matches only that exact hold: not an older one, not another
         // gen's, and never an overlay nobody holds.
         assert!(glass_released(on + 2, on + 2));

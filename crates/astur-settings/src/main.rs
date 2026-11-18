@@ -1377,7 +1377,7 @@ impl App {
         } else {
             &[]
         };
-        let (main, ws) = (c.main_key, c.workspaces);
+        let (main, ws, per_monitor) = (c.main_key, c.workspaces, c.per_monitor);
         let extra_desc = format!("Hold {name} (or the keys you switch on) and press a key to run an action. A custom shortcut wins over Astur's own keys, except the launcher and power menu ones.");
         if table(
             ui,
@@ -1393,7 +1393,7 @@ impl App {
                     argument: String::new(),
                 },
             ),
-            |ui, i, h| hotkey_ui(ui, i, h, (main, extra_issues, ws), scratch_off),
+            |ui, i, h| hotkey_ui(ui, i, h, (main, extra_issues, ws, per_monitor), scratch_off),
         ) {
             fold_hotkeys(&m.rows.hotkeys, c);
         }
@@ -3997,7 +3997,7 @@ fn hotkey_ui(
     ui: &mut Ui,
     i: usize,
     h: &mut HotkeyDef,
-    (main, issues, ws): (MainKey, &[BindIssue], usize),
+    (main, issues, ws, per_monitor): (MainKey, &[BindIssue], usize, bool),
     scratch_off: bool,
 ) -> Option<String> {
     // Part by part as the WM reads it (a lone key name parses as a chord
@@ -4085,7 +4085,7 @@ fn hotkey_ui(
             if workspace_drag(ui, &mut n, ws) {
                 h.argument = n.to_string();
             }
-            missing = missing_workspace(n, ws);
+            missing = workspace_action_warning(&h.action, n, ws, per_monitor);
         }
         Some(Arg::Layout) => {
             let opts: Vec<(&str, &str)> = LAYOUTS.iter().map(|&l| (l, layout_label(l))).collect();
@@ -7547,7 +7547,9 @@ fn click_rows(ui: &mut Ui, f: &mut Find, c: &mut Config, d: &Config) {
                     let id = egui::Id::new(("click", *w, b));
                     let now = click_now(c, w, b);
                     let ws = c.workspaces;
-                    if let Some(v) = click_ui(ui, id, b, &now, (click_default(w, b), ws)) {
+                    if let Some(v) =
+                        click_ui(ui, id, b, &now, (click_default(w, b), ws, c.per_monitor))
+                    {
                         set_click(c, w, b, &v);
                     }
                 }
@@ -7570,7 +7572,7 @@ fn click_ui(
     id: egui::Id,
     button: usize,
     v: &str,
-    (default, ws): (&str, usize),
+    (default, ws, per_monitor): (&str, usize, bool),
 ) -> Option<String> {
     let (action, arg) = v.split_once(' ').unwrap_or((v, ""));
     let label = |a: &str| {
@@ -7610,7 +7612,7 @@ fn click_ui(
             if workspace_drag(ui, &mut n, ws) {
                 out = Some(format!("{action} {n}"));
             }
-            if let Some(why) = missing_workspace(n, ws) {
+            if let Some(why) = workspace_action_warning(action, n, ws, per_monitor) {
                 warn_note(ui, &why);
             }
         }
@@ -7648,8 +7650,16 @@ fn workspace_drag(ui: &mut Ui, n: &mut usize, ws: usize) -> bool {
     ui.add(drag).changed()
 }
 
-/// Why a switch to workspace `n` does nothing, when it is past the `ws` set.
-fn missing_workspace(n: usize, ws: usize) -> Option<String> {
+/// Why a configured workspace action would do nothing.
+fn workspace_action_warning(
+    action: &str,
+    n: usize,
+    ws: usize,
+    per_monitor: bool,
+) -> Option<String> {
+    if action == "switch_workspace_all" && !per_monitor {
+        return Some("Switching all monitors requires per-monitor workspaces.".into());
+    }
     (n > ws).then(|| format!("Workspace {n} doesn't exist (you have {ws}), so this does nothing."))
 }
 
@@ -10394,7 +10404,7 @@ key_close_window = F4
         ctx.data_mut(|d| d.insert_temp(capture_id(), egui::Id::new(("hotkey", 0))));
         let _ = ctx.run(press(egui::Key::Q, None, false), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
-                hotkey_ui(ui, 0, &mut h, (MainKey::LAlt, &[], 10), false)
+                hotkey_ui(ui, 0, &mut h, (MainKey::LAlt, &[], 10, false), false)
             });
         });
         assert_eq!(h.chord, "MOD+CTRL+Q");
@@ -11327,8 +11337,22 @@ key_close_window = F4
         assert_eq!(click_keys()[0][1], "title_right_click");
         assert_eq!(conf_file("logo_middle_click"), "navbar.conf");
         // A workspace past the count set does nothing in the WM: said so.
-        assert!(missing_workspace(15, 10).is_some_and(|w| w.contains("you have 10")));
-        assert_eq!(missing_workspace(10, 10), None);
+        assert!(workspace_action_warning("switch_workspace", 15, 10, false)
+            .is_some_and(|w| w.contains("you have 10")));
+        assert_eq!(
+            workspace_action_warning("switch_workspace", 10, 10, false),
+            None
+        );
+    }
+
+    #[test]
+    fn grouped_workspace_actions_warn_when_workspace_mode_or_count_disallows_them() {
+        let action = "switch_workspace_all";
+        assert!(workspace_action_warning(action, 2, 4, false)
+            .is_some_and(|warning| warning.contains("per-monitor")));
+        assert!(workspace_action_warning(action, 5, 4, true)
+            .is_some_and(|warning| warning.contains("you have 4")));
+        assert_eq!(workspace_action_warning(action, 4, 4, true), None);
     }
 
     #[test]

@@ -252,8 +252,11 @@ previously focused monitor. This grouped switch skips the workspace slide.
 The usual workspace shortcuts still use the configured transition.
 
 For scripting, send `switch_all 2` to Astur's local named pipe when
-`ipc_enabled = true`. The number starts at 1. A switch requires the requested
-workspace on every monitor. Monitors already showing it are left alone.
+`ipc_enabled = true`. The number starts at 1. The pipe returns an error in
+shared mode or when the number exceeds the configured workspace count.
+`ok` means Astur queued the switch. The manager checks that every monitor
+has the requested workspace before changing any display. Monitors already
+showing it are left alone.
 
 ## Scrolling layout
 
