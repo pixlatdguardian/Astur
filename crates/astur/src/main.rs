@@ -12036,15 +12036,15 @@ fn focus_target(ws: &Workspace) -> isize {
         .unwrap_or(0)
 }
 
-/// Alt+J / Alt+K: the window `d` (+1 / -1) steps from the focused one in
-/// `windows` order, wrapping, past the toggled-away scratchpad. Can come back
-/// to the focused window itself; None only when nothing else is left.
+/// Alt+J / Alt+K: step forward or backward in `windows` order, wrapping past
+/// minimized windows and the toggled-away scratchpad. Off-screen scrolling
+/// columns remain eligible so this shortcut can bring them into view.
 fn focus_step(ws: &Workspace, d: i32) -> Option<isize> {
     let idx = focused_index(ws)? as i32;
     let len = ws.windows.len() as i32;
     (1..=len)
         .map(|k| ws.windows[(idx + d * k).rem_euclid(len) as usize])
-        .find(|&w| !scratch_hidden(w))
+        .find(|&w| !scratch_hidden(w) && !unsafe { IsIconic(hwnd_from(w)) }.as_bool())
 }
 
 unsafe fn toggle_scratchpad(mgr: &mut Manager) {
@@ -25042,6 +25042,49 @@ mod tests {
         SCRATCHPAD_HIDDEN.store(false, Ordering::Relaxed);
         assert_eq!(focus_target(&ws), s); // toggled back: an ordinary window
         SCRATCHPAD_HWND.store(0, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn focus_cycle_skips_minimized_windows_in_both_directions() {
+        use windows::Win32::UI::WindowsAndMessaging::WS_MINIMIZE;
+
+        // A hidden tool window lets Win32 report a real minimized state
+        // without taking focus or appearing on the taskbar.
+        let minimized = unsafe {
+            CreateWindowExW(
+                WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                w!("STATIC"),
+                w!(""),
+                WS_POPUP | WS_MINIMIZE,
+                0,
+                0,
+                0,
+                0,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap()
+        };
+        let (a, b) = (0x5C_0B01, 0x5C_0B03);
+        let h = minimized.0 as isize;
+        let was_minimized = unsafe { IsIconic(minimized) }.as_bool();
+        let mut ws = Workspace::new();
+        ws.windows = vec![a, h, b];
+        ws.focused = a;
+        let next = focus_step(&ws, 1);
+        ws.focused = b;
+        let prev = focus_step(&ws, -1);
+        ws.windows = vec![h];
+        ws.focused = h;
+        let all_minimized = focus_step(&ws, 1);
+        unsafe { DestroyWindow(minimized) }.unwrap();
+
+        assert!(was_minimized);
+        assert_eq!(next, Some(b));
+        assert_eq!(prev, Some(a));
+        assert_eq!(all_minimized, None);
     }
 
     #[test]

@@ -212,7 +212,7 @@ shortcut follow the key you picked.
 | `Alt` + `Space` | **App launcher + file search** *(Astur)* |
 | `Alt` + `Shift` + `Space` | **Power / system menu** *(Astur)* |
 | `Alt` + `T` | Toggle tiling mode on/off |
-| `Alt` + `J` / `K` | Focus next / previous window |
+| `Alt` + `J` / `K` | Focus next / previous window, skipping minimized windows |
 | `Alt` + `Shift+J` / `Shift+K` | Swap window with next / previous |
 | `Alt` + arrows | Focus window by direction (cursor follows) |
 | `Alt` + `Shift` + arrows | Move window by direction (across monitors) |
@@ -317,7 +317,7 @@ own strip and scroll position.
 | `Alt` + `Up` / `Down` | Focus window up / down in the column (tabbed: previous / next tab) |
 | `Alt` + `Shift` + `Left` / `Right` | Move column (at the strip end: window to next monitor) |
 | `Alt` + `Shift` + `Up` / `Down` | Move window up / down in its column (tabbed: reorder tab) |
-| `Alt` + `J` / `K` | Focus next / previous window |
+| `Alt` + `J` / `K` | Focus next / previous window, skipping minimized windows |
 | `Alt` + `Shift+J` / `Shift+K` | Move column right / left |
 | `Alt` + `H` / `L` | Column width − / + 0.1 |
 | `Alt` + `Shift+H` / `Shift+L` | Window height − / + 0.1 within its column |
