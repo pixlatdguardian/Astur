@@ -128,16 +128,17 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetAncestor,
-    GetDesktopWindow, GetLayeredWindowAttributes, GetMessageW, GetShellWindow, GetWindowRect,
-    IsZoomed, RegisterClassW, SetCursorPos, SetLayeredWindowAttributes, SetWindowPos,
-    SetWindowsHookExW, ShowWindow, TranslateMessage, UnhookWindowsHookEx, WindowFromPoint, GA_ROOT,
-    GA_ROOTOWNER, HC_ACTION, HHOOK, HWND_TOPMOST, KBDLLHOOKSTRUCT, LAYERED_WINDOW_ATTRIBUTES_FLAGS,
-    LLKHF_INJECTED, LWA_ALPHA, MSG, MSLLHOOKSTRUCT, SET_WINDOW_POS_FLAGS, SWP_ASYNCWINDOWPOS,
-    SWP_NOACTIVATE, SWP_NOSENDCHANGING, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE,
-    SW_RESTORE, SW_SHOWNA, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL,
-    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN, WNDCLASSW,
-    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    GetDesktopWindow, GetLayeredWindowAttributes, GetMessageW, GetPropW, GetShellWindow,
+    GetWindowRect, IsZoomed, RegisterClassW, RemovePropW, SetCursorPos, SetLayeredWindowAttributes,
+    SetPropW, SetWindowPos, SetWindowsHookExW, ShowWindow, TranslateMessage, UnhookWindowsHookEx,
+    WindowFromPoint, GA_ROOT, GA_ROOTOWNER, HC_ACTION, HHOOK, HWND_TOPMOST, KBDLLHOOKSTRUCT,
+    LAYERED_WINDOW_ATTRIBUTES_FLAGS, LLKHF_INJECTED, LWA_ALPHA, MSG, MSLLHOOKSTRUCT,
+    SET_WINDOW_POS_FLAGS, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOSENDCHANGING, SWP_NOSIZE,
+    SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE, SW_RESTORE, SW_SHOWNA, WH_KEYBOARD_LL, WH_MOUSE_LL,
+    WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
+    WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN,
+    WM_SYSKEYUP, WM_XBUTTONDOWN, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 // --- tiling additions -----------------------------------------------------
@@ -6211,35 +6212,53 @@ fn ipc_worker() {
         }
     }
 }
-/// Undo Astur's per-window styling: full opacity, default border, and — the bit
-/// that used to be missed — REMOVE the `WS_EX_LAYERED` bit we added.
-///
-/// Setting alpha back to 255 is not enough. A layered window stays layered for
-/// the rest of its life, on a separate composition path, even after Astur exits
-/// (review B-16). `unfocused_opacity` defaults to 0.8, so this applied to every
-/// window Astur ever dimmed.
+/// Reset the border and restore any opacity Astur changed. Remove layered
+/// styling only when Astur added it, since apps can set it themselves.
 unsafe fn unstyle_window(hwnd: HWND) {
     if !IsWindow(hwnd).as_bool() {
         return;
     }
     unstyle_visible(hwnd);
-    unlayer_window(hwnd);
+    unlayer_owned_window(hwnd);
 }
 
-/// Drop the `WS_EX_LAYERED` bit, if set. SetWindowLongW sends the window
-/// WM_STYLECHANGING / WM_STYLECHANGED and waits for its app.
-unsafe fn unlayer_window(hwnd: HWND) {
+/// Drop an Astur-owned layered style. Leave its recovery record in place if
+/// the app is hung or the style update fails, so another pass can retry it.
+unsafe fn unlayer_owned_window(hwnd: HWND) {
+    if !matches!(original_opacity(hwnd), Some(WindowOpacity::Unlayered))
+        || IsHungAppWindow(hwnd).as_bool()
+    {
+        return;
+    }
     let ex = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
     if ex & WS_EX_LAYERED.0 != 0 {
         SetWindowLongW(hwnd, GWL_EXSTYLE, (ex & !WS_EX_LAYERED.0) as i32);
     }
+    if GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_LAYERED.0 == 0 {
+        forget_original_opacity(hwnd);
+    }
 }
 
-/// The part of `unstyle_window` the user can see: full opacity and the
-/// default border. The exit restore runs it for every window before any
-/// SetWindowLongW, which waits on the app (#19).
+/// Restore visible opacity before any SetWindowLongW, which waits on the app.
+unsafe fn restore_visible_opacity(hwnd: HWND) {
+    let restored = match original_opacity(hwnd) {
+        Some(WindowOpacity::Unlayered) => {
+            let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA);
+            // The record is still needed until the layered style is removed.
+            false
+        }
+        Some(WindowOpacity::Layered { key, alpha, flags }) => {
+            SetLayeredWindowAttributes(hwnd, key, alpha, flags).is_ok()
+        }
+        _ => false,
+    };
+    if restored {
+        forget_original_opacity(hwnd);
+    }
+}
+
 unsafe fn unstyle_visible(hwnd: HWND) {
-    let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA);
+    restore_visible_opacity(hwnd);
     let def: u32 = 0xFFFFFFFF; // DWMWA_COLOR_DEFAULT
     let _ = DwmSetWindowAttribute(
         hwnd,
@@ -6341,7 +6360,7 @@ unsafe fn restore_windows(list: &[isize]) {
         unpark_window(h, sent.get(&h).copied(), true);
     }
     // Undo dimming and the border for every window, a hung app's last; then
-    // the layered style, which waits on each app (unlayer_window), so a hung
+    // the layered style, which waits on each app, so a hung
     // app's windows keep it. A watchdog cut then costs at most that
     // invisible bit. Whether SLWA or the DWM border call waits on a hung app
     // is unmeasured; the watchdog bounds them either way.
@@ -6357,7 +6376,7 @@ unsafe fn restore_windows(list: &[isize]) {
         let _ = ShowWindow(hwnd, SW_SHOWNA);
     }
     for &h in &ok {
-        unlayer_window(hwnd_from(h));
+        unlayer_owned_window(hwnd_from(h));
     }
     SUPPRESS.store(false, Ordering::Relaxed);
 }
@@ -7392,15 +7411,6 @@ unsafe fn retile_all(mgr: &Manager) {
     retile_monitor(mgr, f);
 }
 
-/// Does a layered window's alpha still need setting? `read_ok`, `flags` and
-/// `cur` are what GetLayeredWindowAttributes returned. Only a successful read
-/// of exactly LWA_ALPHA at the target value is a skip: a failed read (never set
-/// through SLWA, or UpdateLayeredWindow), a colour key, or another value is set
-/// as before.
-fn alpha_set_needed(read_ok: bool, flags: u32, cur: u8, target: u8) -> bool {
-    !read_ok || flags != LWA_ALPHA.0 || cur != target
-}
-
 /// The layered alpha style_window gives a window: 255 focused, the
 /// `unfocused_opacity` share of 255 otherwise. None when dimming is off
 /// (>= 0.999): style_window then leaves the window's alpha alone. The motion
@@ -7415,36 +7425,145 @@ fn styled_alpha(focused: bool, unfocused_opacity: f32) -> Option<u8> {
     (unfocused_opacity < 0.999).then_some(alpha)
 }
 
-/// The layered alpha `hwnd` is composited at now (styled or the app's own),
-/// 255 when it has none: a DWM thumbnail leaves it out (measured), so the
-/// motion draws it in. Reads window attributes only, no message to the app.
-unsafe fn shown_alpha(hwnd: HWND) -> u8 {
+#[derive(Clone, Copy)]
+enum WindowOpacity {
+    Unlayered,
+    Layered {
+        key: COLORREF,
+        alpha: u8,
+        flags: LAYERED_WINDOW_ATTRIBUTES_FLAGS,
+    },
+    /// Per-pixel layering has no restorable whole-window attributes.
+    AppComposited,
+}
+
+// Window-owned properties survive Astur's process exit and follow the window's
+// lifetime, so a reused HWND cannot inherit another window's recovery record.
+// Store the colour separately so the complete record fits on 32-bit Windows.
+const OPACITY_RECORD: PCWSTR = w!("Astur.OriginalOpacity.v1");
+const OPACITY_COLOR: PCWSTR = w!("Astur.OriginalOpacityColor.v1");
+const ORIGINALLY_UNLAYERED: usize = 1;
+// Tag the layered record above its flags and alpha bytes.
+const ORIGINALLY_LAYERED: usize = 1 << 16;
+
+unsafe fn original_opacity(hwnd: HWND) -> Option<WindowOpacity> {
+    let value = GetPropW(hwnd, OPACITY_RECORD).0 as usize;
+    match value {
+        ORIGINALLY_UNLAYERED => Some(WindowOpacity::Unlayered),
+        value if value & ORIGINALLY_LAYERED != 0 => Some(WindowOpacity::Layered {
+            key: COLORREF(GetPropW(hwnd, OPACITY_COLOR).0 as usize as u32),
+            alpha: value as u8,
+            flags: LAYERED_WINDOW_ATTRIBUTES_FLAGS(((value >> 8) & 0xff) as u32),
+        }),
+        _ => None,
+    }
+}
+
+unsafe fn forget_original_opacity(hwnd: HWND) {
+    if RemovePropW(hwnd, OPACITY_RECORD).is_ok() {
+        let _ = RemovePropW(hwnd, OPACITY_COLOR);
+    }
+}
+
+unsafe fn remember_original_opacity(hwnd: HWND, opacity: WindowOpacity) -> bool {
+    if original_opacity(hwnd).is_some() {
+        return true;
+    }
+    // Set the record last. An interrupted write to the colour alone is
+    // harmless, and every subsequent attempt replaces or removes that colour.
+    let _ = RemovePropW(hwnd, OPACITY_COLOR);
+    let value = match opacity {
+        WindowOpacity::Unlayered => ORIGINALLY_UNLAYERED,
+        WindowOpacity::Layered { key, alpha, flags } => {
+            if key.0 != 0
+                && SetPropW(hwnd, OPACITY_COLOR, HANDLE(key.0 as usize as *mut c_void)).is_err()
+            {
+                return false;
+            }
+            ORIGINALLY_LAYERED | ((flags.0 as usize) << 8) | usize::from(alpha)
+        }
+        WindowOpacity::AppComposited => return false,
+    };
+    SetPropW(hwnd, OPACITY_RECORD, HANDLE(value as *mut c_void)).is_ok()
+}
+
+/// Restore records even for windows the next instance will ignore or exempt.
+unsafe fn recover_window_opacity(hwnd: HWND) {
+    if !GetPropW(hwnd, OPACITY_RECORD).0.is_null() {
+        restore_visible_opacity(hwnd);
+        unlayer_owned_window(hwnd);
+    }
+}
+
+unsafe fn rescue_opacity() {
+    unsafe extern "system" fn restore(hwnd: HWND, _: LPARAM) -> BOOL {
+        recover_window_opacity(hwnd);
+        BOOL(1)
+    }
+    let _ = EnumWindows(Some(restore), LPARAM(0));
+}
+
+unsafe fn window_opacity(hwnd: HWND) -> WindowOpacity {
     if GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_LAYERED.0 == 0 {
-        return 255;
+        return WindowOpacity::Unlayered;
     }
-    let mut cur = 255u8;
+    let mut key = COLORREF(0);
+    let mut alpha = 255u8;
     let mut flags = LAYERED_WINDOW_ATTRIBUTES_FLAGS(0);
-    let ok = GetLayeredWindowAttributes(
-        hwnd,
-        None,
-        Some(&mut cur as *mut u8),
-        Some(&mut flags as *mut _),
-    )
-    .is_ok();
-    if ok && flags.0 & LWA_ALPHA.0 != 0 {
-        cur
+    if GetLayeredWindowAttributes(hwnd, Some(&mut key), Some(&mut alpha), Some(&mut flags)).is_ok()
+    {
+        WindowOpacity::Layered { key, alpha, flags }
     } else {
-        255
+        WindowOpacity::AppComposited
     }
+}
+
+unsafe fn window_dimming_target(hwnd: HWND, focused: bool, cfg: &Config) -> Option<u8> {
+    let target = styled_alpha(focused, cfg.unfocused_opacity)?;
+    if !cfg.opacity_exempt.is_empty()
+        && tracked_exe(hwnd).is_some_and(|exe| cfg.opacity_exempts(&exe))
+    {
+        return None;
+    }
+    Some(target)
+}
+
+unsafe fn apply_dimming(hwnd: HWND, target: u8) {
+    let original = window_opacity(hwnd);
+    let (key, flags) = match original {
+        WindowOpacity::Unlayered => (COLORREF(0), LWA_ALPHA),
+        WindowOpacity::Layered { key, alpha, flags } => {
+            // Preserve the app's colour key. Skip issuing a whole-window
+            // update when the existing alpha is already right (SWITCH-18).
+            if flags.contains(LWA_ALPHA) && alpha == target {
+                return;
+            }
+            (key, flags | LWA_ALPHA)
+        }
+        // SLWA would stop a per-pixel layered window using UpdateLayeredWindow.
+        WindowOpacity::AppComposited => return,
+    };
+    if EXITING.load(Ordering::Relaxed) || !remember_original_opacity(hwnd, original) {
+        return;
+    }
+    if matches!(original, WindowOpacity::Unlayered) {
+        let ex = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+        SetWindowLongW(hwnd, GWL_EXSTYLE, (ex | WS_EX_LAYERED.0) as i32);
+    }
+    let _ = SetLayeredWindowAttributes(hwnd, key, target, flags);
 }
 
 /// A managed window's dim across a motion: (what it shows now, what
 /// style_window leaves it at when it ends `focused` or not).
 unsafe fn motion_dims(hwnd: HWND, focused: bool, cfg: &Config) -> (u8, u8) {
-    let now = shown_alpha(hwnd);
+    let now = match window_opacity(hwnd) {
+        WindowOpacity::Layered { alpha, flags, .. } if flags.contains(LWA_ALPHA) => alpha,
+        WindowOpacity::AppComposited => return (255, 255),
+        _ => 255,
+    };
     (
         now,
-        styled_alpha(focused, cfg.unfocused_opacity).unwrap_or(now),
+        window_dimming_target(hwnd, focused, cfg).unwrap_or(now),
     )
 }
 
@@ -7455,35 +7574,10 @@ unsafe fn style_window(hwnd: HWND, focused: bool, cfg: &Config) {
     if EXITING.load(Ordering::Relaxed) {
         return;
     }
-    if let Some(alpha) = styled_alpha(focused, cfg.unfocused_opacity) {
-        let ex = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
-        let was_layered = ex & WS_EX_LAYERED.0 != 0;
-        if !was_layered {
-            SetWindowLongW(hwnd, GWL_EXSTYLE, (ex | WS_EX_LAYERED.0) as i32);
-        }
-        // Skip a SetLayeredWindowAttributes that would re-send the alpha the
-        // window already has (SWITCH-18): every switch restyles each incoming
-        // window, and hidden windows keep their alpha, so nearly all of those
-        // are repeats. SLWA measured ~250 us per call (0.7-1.3 ms under load),
-        // on the manager thread before focus lands. The read is the live
-        // value, not a cache, so an app that changed its own opacity, or a
-        // cancelled shutdown that un-styled everything, is still corrected. A
-        // freshly-layered window has no alpha to read and is always set.
-        let needed = !was_layered || {
-            let mut cur = 0u8;
-            let mut flags = LAYERED_WINDOW_ATTRIBUTES_FLAGS(0);
-            let ok = GetLayeredWindowAttributes(
-                hwnd,
-                None,
-                Some(&mut cur as *mut u8),
-                Some(&mut flags as *mut _),
-            )
-            .is_ok();
-            alpha_set_needed(ok, flags.0, cur, alpha)
-        };
-        if needed {
-            let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), alpha, LWA_ALPHA);
-        }
+    if let Some(alpha) = window_dimming_target(hwnd, focused, cfg) {
+        apply_dimming(hwnd, alpha);
+    } else {
+        recover_window_opacity(hwnd);
     }
     if cfg.border_enabled {
         set_border(hwnd, focused, cfg);
@@ -12338,6 +12432,7 @@ unsafe fn untrack_window(mgr: &mut Manager, h: isize) {
         // without being shown; a no-op for a destroyed or on-screen window.
         // LAST_SENT still holds it (pruned at the next sync).
         unpark_tracked(h);
+        unstyle_window(hwnd_from(h));
         // Out of MANAGED now, not at the sync after this command: the retile
         // below raises SUPPRESS, and an app re-showing `h` meanwhile would
         // pass for our own echo (SUPPRESS && is_managed) and be dropped,
@@ -12761,6 +12856,7 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                 wp_publish(&mgr.monitors, &mgr.cfg, WP_DEBOUNCE);
             }
             if g.style {
+                cancel_glide();
                 // Reset every window's styling so disabling opacity/borders
                 // takes effect, then re-apply from scratch.
                 SUPPRESS.store(true, Ordering::Relaxed);
@@ -24616,6 +24712,8 @@ fn main() {
             log_error!("running on built-in defaults, config file left untouched: {e}");
         }
         log_startup_environment(dpi_aware.is_ok());
+        // Restore opacity before adopting windows or applying this run's rules.
+        rescue_opacity();
         if cfg.persist_state {
             load_launcher_mru();
         }
@@ -25163,16 +25261,160 @@ mod tests {
         assert!(!focused_follow_allowed(0, 0));
     }
 
+    struct OpacityTestWindow(HWND);
+
+    impl Drop for OpacityTestWindow {
+        fn drop(&mut self) {
+            // The test owns these windows and runs on their creating thread.
+            unsafe {
+                unstyle_window(self.0);
+                let _ = DestroyWindow(self.0);
+            }
+        }
+    }
+
+    impl OpacityTestWindow {
+        fn new(ex_style: WINDOW_EX_STYLE) -> Self {
+            Self(unsafe {
+                CreateWindowExW(
+                    ex_style | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                    w!("STATIC"),
+                    w!(""),
+                    WS_POPUP,
+                    -30_000,
+                    -30_000,
+                    1,
+                    1,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap()
+            })
+        }
+    }
+
     #[test]
-    fn alpha_is_resent_unless_the_window_already_has_it() {
-        let alpha = LWA_ALPHA.0;
-        assert!(!alpha_set_needed(true, alpha, 204, 204));
-        assert!(alpha_set_needed(true, alpha, 255, 204));
-        // Failed read (never set through SLWA): set it.
-        assert!(alpha_set_needed(false, alpha, 204, 204));
-        // Colour key or no flags: not ours, set it.
-        assert!(alpha_set_needed(true, 0, 204, 204));
-        assert!(alpha_set_needed(true, alpha | 1, 204, 204));
+    fn opacity_exemption_reloads_for_existing_windows_and_glide() {
+        use windows::Win32::UI::WindowsAndMessaging::LWA_COLORKEY;
+
+        let plain = OpacityTestWindow::new(WINDOW_EX_STYLE(0));
+        let layered = OpacityTestWindow::new(WS_EX_LAYERED);
+        let app_composited = OpacityTestWindow::new(WS_EX_LAYERED);
+        let key = COLORREF(0x30_20_10);
+        let flags = LWA_ALPHA | LWA_COLORKEY;
+        let mut mgr = test_manager(1, 1);
+        mgr.cfg.workspaces = 1;
+        mgr.cfg.border_enabled = false;
+        mgr.monitors[0].layout = mgr.cfg.layout.clone();
+        let windows = &mut mgr.monitors[0].workspaces[0].windows;
+        windows.extend([plain.0, layered.0, app_composited.0].map(|h| h.0 as isize));
+
+        unsafe {
+            SetLayeredWindowAttributes(layered.0, key, 170, flags).unwrap();
+            style_all(&mgr);
+            assert_eq!(motion_dims(plain.0, false, &mgr.cfg), (204, 204));
+            assert_eq!(motion_dims(layered.0, false, &mgr.cfg), (204, 204));
+            assert!(matches!(
+                window_opacity(app_composited.0),
+                WindowOpacity::AppComposited
+            ));
+
+            let mut cfg = mgr.cfg.clone();
+            let exe = window_exe(plain.0).unwrap();
+            cfg.opacity_exempt = vec![exe.rsplit(['\\', '/']).next().unwrap().to_ascii_uppercase()];
+            process(&mut mgr, Cmd::Reload(Box::new(cfg), false));
+
+            assert!(matches!(window_opacity(plain.0), WindowOpacity::Unlayered));
+            assert!(matches!(window_opacity(layered.0), WindowOpacity::Layered {
+                key: restored_key, alpha: 170, flags: restored_flags,
+            } if restored_key == key && restored_flags == flags));
+            assert_eq!(motion_dims(plain.0, false, &mgr.cfg), (255, 255));
+            assert_eq!(motion_dims(layered.0, true, &mgr.cfg), (170, 170));
+
+            let mut cfg = mgr.cfg.clone();
+            cfg.opacity_exempt.clear();
+            process(&mut mgr, Cmd::Reload(Box::new(cfg), false));
+            assert_eq!(motion_dims(plain.0, false, &mgr.cfg), (204, 204));
+        }
+    }
+
+    #[test]
+    #[ignore = "child process for the opacity crash-recovery test"]
+    fn opacity_crash_writer() {
+        let Ok(windows) = std::env::var("ASTUR_TEST_OPACITY_WINDOWS") else {
+            return;
+        };
+        for h in windows.split(',') {
+            unsafe { apply_dimming(hwnd_from(h.parse().unwrap()), 204) };
+        }
+        std::thread::park_timeout(std::time::Duration::from_secs(10));
+    }
+
+    #[test]
+    fn opacity_recovery_survives_the_styling_process_being_killed() {
+        use std::process::{Command, Stdio};
+        use std::time::Duration;
+        use windows::Win32::UI::WindowsAndMessaging::LWA_COLORKEY;
+
+        let plain = OpacityTestWindow::new(WINDOW_EX_STYLE(0));
+        let native = OpacityTestWindow::new(WS_EX_LAYERED);
+        let untouched = OpacityTestWindow::new(WS_EX_LAYERED);
+        let key = COLORREF(0x65_43_21);
+        let flags = LWA_ALPHA | LWA_COLORKEY;
+        unsafe {
+            SetLayeredWindowAttributes(native.0, key, 179, flags).unwrap();
+            SetLayeredWindowAttributes(untouched.0, COLORREF(0), 204, LWA_ALPHA).unwrap();
+        }
+        let windows = [plain.0, native.0].map(|hwnd| (hwnd.0 as isize).to_string());
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args(["--ignored", "--exact", "tests::opacity_crash_writer"])
+            .env("ASTUR_TEST_OPACITY_WINDOWS", windows.join(","))
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut msg = MSG::default();
+        let dimmed = loop {
+            // SetWindowLongW in the child sends messages to this owner thread.
+            unsafe {
+                while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                    DispatchMessageW(&msg);
+                }
+                if [plain.0, native.0].into_iter().all(|hwnd| {
+                    matches!(
+                        window_opacity(hwnd),
+                        WindowOpacity::Layered { alpha: 204, .. }
+                    )
+                }) {
+                    break true;
+                }
+            }
+            if child.try_wait().unwrap().is_some() || Instant::now() >= deadline {
+                break false;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        let _ = child.kill();
+        child.wait().unwrap();
+        assert!(dimmed, "the child did not reach the dimmed state");
+
+        unsafe {
+            // The same per-window recovery used by the startup enumeration.
+            for hwnd in [plain.0, native.0, untouched.0] {
+                recover_window_opacity(hwnd);
+                assert!(original_opacity(hwnd).is_none());
+            }
+            assert!(matches!(window_opacity(plain.0), WindowOpacity::Unlayered));
+            assert!(matches!(window_opacity(native.0), WindowOpacity::Layered {
+                key: restored_key, alpha: 179, flags: restored_flags,
+            } if restored_key == key && restored_flags == flags));
+            assert!(matches!(
+                window_opacity(untouched.0),
+                WindowOpacity::Layered { alpha: 204, .. }
+            ));
+        }
     }
 
     #[test]

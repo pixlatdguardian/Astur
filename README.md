@@ -258,6 +258,26 @@ shared mode or when the number exceeds the configured workspace count.
 has the requested workspace before changing any display. Monitors already
 showing it are left alone.
 
+### Dimming exceptions
+
+In Settings → Appearance → Windows → **Dimming exceptions**, add an app by
+executable name or pick one of its open windows. The app keeps its own opacity
+when inactive and during window glide. The same windows still tile, float, and
+switch workspaces normally.
+
+The setting is a comma-separated list of file names in `astur.conf`. Names
+are matched without regard to case. When Windows reports a shared executable
+such as `ApplicationFrameHost.exe`, the picker disables that entry. Typing an
+executable name deliberately applies the exemption to every window it hosts.
+
+Apps that draw their own per-pixel transparency keep control of it. If Astur
+exits unexpectedly, it restores the opacity changes it recorded the next
+time it starts.
+
+```ini
+opacity_exempt = brave.exe, vlc.exe
+```
+
 ## Scrolling layout
 
 `layout = scrolling` (or a monitor's entry in `monitor_layouts`) lays windows out

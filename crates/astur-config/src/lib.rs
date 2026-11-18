@@ -63,6 +63,7 @@ pub struct Config {
     pub terminal: String,         // command launched by Alt+Enter
     pub browser: String,          // Alt+Shift+Enter; empty = default browser
     pub unfocused_opacity: f32,   // 0.0-1.0 alpha for unfocused windows (1.0 = off)
+    pub opacity_exempt: Vec<String>, // executable names that keep their own opacity
     pub border_enabled: bool,     // draw coloured DWM borders (Windows 11)
     pub focused_border: u32,      // COLORREF for the focused window border
     pub unfocused_border: u32,    // COLORREF for unfocused window borders
@@ -1134,6 +1135,15 @@ pub const BAR_PRESETS: &[BarPreset] = &[
 ];
 
 impl Config {
+    /// Whether an executable keeps its own opacity. Match the file name so
+    /// moving or updating an installed app does not break the exemption.
+    pub fn opacity_exempts(&self, executable: &str) -> bool {
+        let name = executable.rsplit(['\\', '/']).next().unwrap_or_default();
+        self.opacity_exempt
+            .iter()
+            .any(|app| app.eq_ignore_ascii_case(name))
+    }
+
     pub fn defaults() -> Self {
         Config {
             per_monitor: false,
@@ -1161,6 +1171,7 @@ impl Config {
             terminal: "wt.exe".to_string(),
             browser: String::new(),
             unfocused_opacity: 0.8,
+            opacity_exempt: Vec::new(),
             border_enabled: true,
             focused_border: parse_color("#66AAFF", 0x00FFAA66),
             unfocused_border: parse_color("#223A5E", 0x005E3A22),
@@ -1665,12 +1676,16 @@ popup_accent_fg = auto
 popup_border = auto
 
 # Dim unfocused windows to this opacity.  float 0.10 - 1.00  (1.0 = disabled)
-# Trade-off worth knowing: any value below 1.0 makes Astur add WS_EX_LAYERED to
-# every window it manages, which puts those apps on a different composition
+# Trade-off worth knowing: any value below 1.0 can make Astur add WS_EX_LAYERED
+# to managed windows, which puts those apps on a different composition
 # path. A few (older games, some capture tools and Electron overlays) behave
 # differently when layered. Set 1.0 to leave app window styles untouched.
-# Astur removes the style again when it quits or reloads with dimming off.
+# Astur leaves per-pixel layered windows to the app that draws them.
+# It restores its own changes when it quits or next starts after a crash.
 unfocused_opacity = 0.8
+# Executable file names, separated by commas. These apps stay managed and
+# keep their own opacity. Example: opacity_exempt = brave.exe, vlc.exe
+opacity_exempt =
 
 # Coloured window borders. Requires Windows 11 (no effect on Windows 10).  bool
 border_enabled = true
@@ -2839,6 +2854,7 @@ fn parse_into_from(c: &mut Config, text: &str, source: &str) {
                     c.unfocused_opacity = n.clamp(0.1, 1.0);
                 }
             }
+            "opacity_exempt" => c.opacity_exempt = parse_list(v),
             "border_enabled" => c.border_enabled = parse_bool(v),
             "focused_border" => c.focused_border = parse_color(v, c.focused_border),
             "unfocused_border" => c.unfocused_border = parse_color(v, c.unfocused_border),
@@ -3454,6 +3470,7 @@ pub fn reload_groups(old: &Config, new: &Config) -> ReloadGroups {
         terminal,
         browser,
         unfocused_opacity,
+        opacity_exempt,
         border_enabled,
         focused_border,
         unfocused_border,
@@ -3638,7 +3655,7 @@ pub fn reload_groups(old: &Config, new: &Config) -> ReloadGroups {
     // `shape` decides floating, which changes the reserved height; `monitors`
     // which screens reserve one at all.
     diff!(wm: bar_shape, bar_monitors);
-    diff!(style: unfocused_opacity, border_enabled, focused_border, unfocused_border);
+    diff!(style: unfocused_opacity, opacity_exempt, border_enabled, focused_border, unfocused_border);
     // wp_publish: whether any animation reads the wallpaper cache.
     diff!(anim: animations, animation_ms, workspace_slide, workspace_anim, window_anim);
     // Everything the bar draws. Snapshot fields (colours, formats, zones)
@@ -4422,6 +4439,24 @@ pub fn compile_keys(c: &Config) -> Keymap {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opacity_exemptions_match_executable_names_and_reload_styling() {
+        let old = Config::defaults();
+        let cfg = parse_text("opacity_exempt = Brave.exe, , vlc.EXE");
+        assert_eq!(cfg.opacity_exempt, ["Brave.exe", "vlc.EXE"]);
+        assert!(cfg.opacity_exempts(r"C:\Program Files\Brave\Application\brave.exe"));
+        assert!(cfg.opacity_exempts("VLC.exe"));
+        assert!(!cfg.opacity_exempts("brave-beta.exe"));
+        assert!(!old.opacity_exempts("brave.exe"));
+        assert_eq!(
+            reload_groups(&old, &cfg),
+            ReloadGroups {
+                style: true,
+                ..Default::default()
+            }
+        );
+    }
 
     #[test]
     fn unknown_keys_are_reported_not_swallowed() {
