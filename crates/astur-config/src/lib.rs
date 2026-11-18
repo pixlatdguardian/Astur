@@ -1676,7 +1676,8 @@ popup_border = auto
 # to managed windows, which puts those apps on a different composition
 # path. A few (older games, some capture tools and Electron overlays) behave
 # differently when layered. Set 1.0 to leave app window styles untouched.
-# Astur removes the style again when it quits or reloads with dimming off.
+# Astur leaves per-pixel layered windows to the app that draws them.
+# It restores its own changes when it quits or next starts after a crash.
 unfocused_opacity = 0.8
 # Executable file names, separated by commas. These apps stay managed and
 # keep their own opacity. Example: opacity_exempt = brave.exe, vlc.exe

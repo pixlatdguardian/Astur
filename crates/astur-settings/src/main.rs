@@ -1787,7 +1787,7 @@ impl App {
             ("+ Add app", String::new()),
             |ui, _, app| {
                 cell(ui, app, "App, e.g. brave.exe", 170.0);
-                if let Some(w) = window_picker(ui).filter(|w| !w.exe.is_empty()) {
+                if let Some(w) = window_picker_for(ui, |w| opacity_picker_block(&w.exe)) {
                     *app = file_name(&w.exe).to_string();
                 }
                 opacity_app_check(app).err()
@@ -3627,6 +3627,13 @@ fn shares_row(
 /// "Pick an open window": a menu of the app windows open now (title, then
 /// the app's file name). Returns the one clicked.
 fn window_picker(ui: &mut Ui) -> Option<OpenWindow> {
+    window_picker_for(ui, |_| None)
+}
+
+fn window_picker_for(
+    ui: &mut Ui,
+    blocked: impl Fn(&OpenWindow) -> Option<&'static str>,
+) -> Option<OpenWindow> {
     let mut picked = None;
     ui.menu_button("Pick an open window", |ui| {
         let list = window_list(ui.ctx());
@@ -3638,7 +3645,11 @@ fn window_picker(ui: &mut Ui) -> Option<OpenWindow> {
             .show(ui, |ui| {
                 for w in list.iter() {
                     let text = format!("{}  \u{00B7}  {}", clip(&w.title, 48), file_name(&w.exe));
-                    if ui.button(text).clicked() {
+                    let reason = blocked(w);
+                    let button = ui.add_enabled(reason.is_none(), egui::Button::new(text));
+                    if let Some(reason) = reason {
+                        button.on_disabled_hover_text(reason);
+                    } else if button.clicked() {
                         picked = Some(w.clone());
                         ui.close_menu();
                     }
@@ -5887,6 +5898,17 @@ fn opacity_app_check(app: &str) -> Result<String, String> {
         Ok(name.to_string())
     } else {
         Err("Enter an executable file name, such as brave.exe.".into())
+    }
+}
+
+fn opacity_picker_block(executable: &str) -> Option<&'static str> {
+    let name = file_name(executable);
+    if name.is_empty() {
+        Some("Windows did not report this app's executable name.")
+    } else if HOSTS.iter().any(|host| name.eq_ignore_ascii_case(host)) {
+        Some("This is a shared host. Exempting it would affect every app window it hosts.")
+    } else {
+        None
     }
 }
 
@@ -9945,6 +9967,9 @@ mod tests {
         assert!(opacity_app_check("").is_err());
         assert!(opacity_app_check("brave.exe,vlc.exe").is_err());
         assert!(opacity_app_check(r"C:\Program Files\Brave\brave.exe").is_err());
+        assert_eq!(opacity_picker_block(r"C:\Apps\Brave\brave.exe"), None);
+        assert!(opacity_picker_block("ApplicationFrameHost.EXE").is_some());
+        assert!(opacity_picker_block("").is_some());
         let cfg = parse_text("opacity_exempt = brave.exe, vlc.exe");
         let read_back = parse_text(&wm_text(&cfg));
         assert_eq!(
