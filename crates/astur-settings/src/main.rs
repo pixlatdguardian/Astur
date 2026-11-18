@@ -5299,6 +5299,11 @@ const ACTIONS: &[(&str, &str, Arg)] = &[
     ("grow_master", "Make the main window bigger", Arg::None),
     ("toggle_tiling", "Turn tiling on or off", Arg::None),
     ("toggle_float", "Float or tile the window", Arg::None),
+    (
+        "toggle_pin",
+        "Pin or unpin the window across workspaces",
+        Arg::None,
+    ),
     ("close", "Close the window", Arg::None),
     ("terminal", "Open the terminal", Arg::None),
     ("browser", "Open the browser", Arg::None),

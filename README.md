@@ -237,6 +237,22 @@ in `%USERPROFILE%\.astur\astur.conf`, along with workspace keys, gaps, layout,
 borders, rules, launcher, menus, and desktop tools. Status bar uses `navbar.conf`
 in same folder. Both files **hot-reload** on save.
 
+### Pin a window across workspaces
+
+Add **Pin or unpin the window across workspaces** under Extra hotkeys, or
+add `MOD+O|toggle_pin|` to `extra_hotkeys`. You can also send `toggle_pin`
+to the local IPC pipe.
+
+Pinning a managed window floats it above the other windows on its display.
+It stays visible as you change Astur workspaces. Unpinning leaves it on the
+current workspace and restores whether it was tiled, floating, or already
+always on top. Unpin it before sending it directly to a numbered workspace.
+Workspace slides are skipped on a display with a pinned window so that the
+video or controls stay in place during the switch.
+
+If Astur exits unexpectedly, a pin-aware build releases its pins on the next
+launch. Do that before switching back to an older build after a crash.
+
 ## Scrolling layout
 
 `layout = scrolling` (or a monitor's entry in `monitor_layouts`) lays windows out
